@@ -1,0 +1,13 @@
+{
+  "name": "smart-switcher",
+  "owner": {
+    "name": "aeiyankhan2@gmail.com"
+  },
+  "plugins": [
+    {
+      "name": "smart-switcher",
+      "source": "./plugins/claude",
+      "description": "Universal AI CLI manager: /doctor checkup & switching, /auto smart routing with quota fallback, /context for one shared AGENTS.md."
+    }
+  ]
+}

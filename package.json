@@ -1,0 +1,44 @@
+{
+  "name": "smart-switcher",
+  "version": "0.1.0",
+  "description": "Universal manager for AI coding CLIs — detect, install, auth, switch models, and share ONE optimized context file across Claude Code, OpenCode, Gemini CLI, Codex, Copilot, Qwen, Ollama and more.",
+  "type": "module",
+  "bin": {
+    "smart-switcher": "bin/cli.js",
+    "sw": "bin/cli.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "scripts",
+    "templates",
+    "plugins",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "ai",
+    "cli",
+    "claude-code",
+    "opencode",
+    "gemini-cli",
+    "codex",
+    "ollama",
+    "agents-md",
+    "context",
+    "switcher"
+  ],
+  "license": "MIT",
+  "author": "aeiyankhan2@gmail.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aeiyannn/ai-smart-switcher.git"
+  },
+  "scripts": {
+    "start": "node bin/cli.js",
+    "postinstall": "node scripts/postinstall.js"
+  }
+}

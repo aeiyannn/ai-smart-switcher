@@ -1,0 +1,13 @@
+{
+  "name": "smart-switcher-marketplace",
+  "owner": {
+    "name": "smart-switcher"
+  },
+  "plugins": [
+    {
+      "name": "smart-switcher",
+      "source": "./claude",
+      "description": "Universal AI CLI manager: /doctor checkup & switching, /auto smart routing with quota fallback, /context for one shared AGENTS.md."
+    }
+  ]
+}
