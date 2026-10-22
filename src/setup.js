@@ -1,4 +1,4 @@
-// Auto-integration: install smart-switcher's slash commands into Claude Code
+// Auto-integration: install ai-smart-switcher's slash commands into Claude Code
 // and OpenCode so /switch, /auto, /context and /free work there with zero
 // manual steps. Runs from npm postinstall and from `sw setup`.
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
@@ -30,25 +30,44 @@ const TARGETS = [
     dest: join(homedir(), '.config', 'opencode', 'command'),
     how: 'commands in ~/.config/opencode/command',
   },
+];
+
+// Hosts we used to write into in 0.1.x, or still want to clean up even though
+// they are no longer supported. Only OUR files are ever touched.
+const LEGACY_TARGETS = [
   {
     id: 'codex',
-    name: 'Codex CLI',
-    detect: () => which('codex') || existsSync(join(homedir(), '.codex')),
-    src: join(PKG_ROOT, 'plugins', 'codex', 'prompts'),
+    name: 'Codex CLI (legacy)',
     dest: join(homedir(), '.codex', 'prompts'),
     how: 'custom prompts in ~/.codex/prompts',
   },
 ];
 
-// A file in a host's command dir is ours only if it mentions smart-switcher.
+// A file in a host's command dir is ours only if it mentions ai-smart-switcher
+// (or the old smart-switcher name, so upgrades can clean themselves up).
 const isOurs = (p) => {
-  try { return readFileSync(p, 'utf8').includes('smart-switcher'); } catch { return false; }
+  try {
+    const text = readFileSync(p, 'utf8');
+    return text.includes('smart-switcher');
+  } catch {
+    return false;
+  }
 };
 
 // Auto context capture for Claude Code: hooks that pipe each prompt and each
-// finished turn to `smart-switcher context autosave`. Merged into
+// finished turn to `ai-smart-switcher context autosave`. Merged into
 // ~/.claude/settings.json without touching anything else in the file.
-const AUTOSAVE_CMD = 'smart-switcher context autosave 2>/dev/null || true';
+const AUTOSAVE_CMD = 'ai-smart-switcher context autosave';
+const HOOK_MARKER = 'smart-switcher context autosave';
+const NEW_HOOK_MARKER = 'ai-smart-switcher context autosave';
+const OLD_HOOK_RE = /smart-switcher context autosave/;
+
+// True for a hook string written by 0.1.x (which used bare `smart-switcher` or
+// `npx smart-switcher`), false for the current `ai-smart-switcher` hook.
+const isOldHook = (entry) => {
+  const text = JSON.stringify(entry);
+  return text.includes(HOOK_MARKER) && !text.includes(NEW_HOOK_MARKER);
+};
 
 function installClaudeHooks() {
   const file = join(homedir(), '.claude', 'settings.json');
@@ -61,18 +80,50 @@ function installClaudeHooks() {
     }
   }
   settings.hooks = settings.hooks || {};
+
+  // Drop stale 0.1.x hooks first so an upgrade does not run them twice.
+  let cleaned = 0;
+  for (const event of Object.keys(settings.hooks)) {
+    if (!Array.isArray(settings.hooks[event])) continue;
+    const before = settings.hooks[event].length;
+    settings.hooks[event] = settings.hooks[event].filter((entry) => !isOldHook(entry));
+    cleaned += before - settings.hooks[event].length;
+    if (!settings.hooks[event].length) delete settings.hooks[event];
+  }
+
   let added = 0;
   for (const event of ['UserPromptSubmit', 'Stop']) {
     const entries = (settings.hooks[event] = settings.hooks[event] || []);
-    const present = JSON.stringify(entries).includes('smart-switcher context autosave');
+    const present = entries.some((entry) => JSON.stringify(entry).includes(NEW_HOOK_MARKER));
     if (!present) {
       entries.push({ hooks: [{ type: 'command', command: AUTOSAVE_CMD, async: true }] });
       added++;
     }
   }
-  if (!added) return 'auto-capture hooks already present';
+
+  if (!added && !cleaned) return 'auto-capture hooks already present';
   writeFileSync(file, JSON.stringify(settings, null, 2) + '\n');
-  return 'auto-capture hooks installed (prompts + results saved to shared memory)';
+  if (added) {
+    return 'auto-capture hooks installed (prompts + results saved to shared memory)';
+  }
+  return `upgraded ${cleaned} auto-capture hook(s) to ai-smart-switcher`;
+}
+
+function removeLegacyIntegrations() {
+  const removed = [];
+  for (const t of LEGACY_TARGETS) {
+    try {
+      if (!existsSync(t.dest)) continue;
+      for (const f of readdirSync(t.dest).filter((x) => x.endsWith('.md'))) {
+        const p = join(t.dest, f);
+        if (isOurs(p)) {
+          unlinkSync(p);
+          removed.push(`${t.id}/${f}`);
+        }
+      }
+    } catch { /* leave it */ }
+  }
+  return removed;
 }
 
 // Returns a report; never throws (postinstall must not break npm install).
@@ -101,6 +152,8 @@ export function installIntegrations({ log = () => {} } = {}) {
       report.push({ ...t, status: 'error', error: err?.message });
     }
   }
+  const legacy = removeLegacyIntegrations();
+  if (legacy.length) report.push({ id: 'legacy', name: 'Legacy hosts', status: 'cleaned', files: legacy });
   return report;
 }
 
@@ -108,13 +161,16 @@ export function installIntegrations({ log = () => {} } = {}) {
 // autosave hooks from ~/.claude/settings.json — everything else is untouched.
 export function removeIntegrations() {
   const report = [];
-  for (const t of TARGETS) {
+  for (const t of [...TARGETS, ...LEGACY_TARGETS]) {
     let removed = 0;
     try {
       if (existsSync(t.dest)) {
         for (const f of readdirSync(t.dest).filter((x) => x.endsWith('.md'))) {
           const p = join(t.dest, f);
-          if (isOurs(p)) { unlinkSync(p); removed++; }
+          if (isOurs(p)) {
+            unlinkSync(p);
+            removed++;
+          }
         }
       }
       report.push({ ...t, status: 'removed', count: removed });
@@ -122,7 +178,7 @@ export function removeIntegrations() {
       report.push({ ...t, status: 'error', error: err?.message });
     }
   }
-  // strip autosave hooks
+  // strip autosave hooks (old and new)
   const file = join(homedir(), '.claude', 'settings.json');
   let hooksMsg = 'no hooks found';
   try {
@@ -130,9 +186,10 @@ export function removeIntegrations() {
       const settings = JSON.parse(readFileSync(file, 'utf8'));
       let stripped = 0;
       for (const event of Object.keys(settings.hooks || {})) {
+        if (!Array.isArray(settings.hooks[event])) continue;
         const before = settings.hooks[event].length;
         settings.hooks[event] = settings.hooks[event].filter(
-          (entry) => !JSON.stringify(entry).includes('smart-switcher context autosave')
+          (entry) => !OLD_HOOK_RE.test(JSON.stringify(entry))
         );
         stripped += before - settings.hooks[event].length;
         if (!settings.hooks[event].length) delete settings.hooks[event];
@@ -152,7 +209,7 @@ export function removeIntegrations() {
 export async function cmdSetup(action) {
   const { c, heading, ok, info, warn } = await import('./ui.js');
   if (action === 'remove' || action === 'off' || action === 'uninstall' || action === 'disable') {
-    heading('Disabling smart-switcher integrations');
+    heading('Disabling ai-smart-switcher integrations');
     const { report, hooksMsg } = removeIntegrations();
     for (const r of report) {
       if (r.status === 'removed') {
@@ -163,10 +220,10 @@ export async function cmdSetup(action) {
     }
     info(`Claude Code: ${hooksMsg}`);
     console.log(c.gray('\n  The sw CLI itself still works. Re-enable anytime with: sw setup'));
-    console.log(c.gray('  To remove everything: npm uninstall -g smart-switcher'));
+    console.log(c.gray('  To remove everything: npm uninstall -g ai-smart-switcher'));
     return;
   }
-  heading('Installing Claude Code / OpenCode / Codex integrations');
+  heading('Installing Claude Code / OpenCode integrations');
   const report = installIntegrations();
   for (const r of report) {
     if (r.status === 'installed') {
@@ -174,6 +231,8 @@ export async function cmdSetup(action) {
       if (r.hooks) info(`${r.name}: ${r.hooks}`);
     } else if (r.status === 'absent') {
       info(`${r.name} not found on this machine — skipped. (Install it, then re-run: sw setup)`);
+    } else if (r.status === 'cleaned') {
+      info(`Removed ${r.files.length} legacy file(s): ${r.files.join(', ')}`);
     } else {
       warn(`${r.name}: ${r.error}`);
     }

@@ -1,8 +1,8 @@
 {
-  "name": "smart-switcher",
-  "description": "Universal AI CLI manager: switch agents/models, manage auth, and keep one shared AGENTS.md context across Claude Code, OpenCode, Gemini, Codex, Copilot, Qwen and Ollama.",
-  "version": "0.1.0",
+  "name": "ai-smart-switcher",
+  "description": "Universal AI CLI manager: switch agents/models, manage auth, and keep one shared AGENTS.md context + one shared memory file across Claude Code, OpenCode, Freebuff, Devin and Antigravity.",
+  "version": "0.2.0",
   "author": {
-    "name": "smart-switcher"
+    "name": "ai-smart-switcher"
   }
 }

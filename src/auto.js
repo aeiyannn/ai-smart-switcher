@@ -21,17 +21,19 @@ export function classify(prompt) {
   return 'medium';
 }
 
-// Preferred order per tier. Light = free/local first; heavy = strongest first.
+// Preferred order per tier. Light = free first; heavy = strongest first.
+// Freebuff is listed for completeness but is always filtered out of auto mode:
+// it is an interactive TUI and accepts no unattended prompt.
 const TIER_ORDER = {
-  light: ['ollama', 'antigravity', 'gemini', 'opencode', 'copilot', 'qwen', 'claude', 'codex'],
-  medium: ['antigravity', 'gemini', 'opencode', 'copilot', 'claude', 'codex', 'qwen', 'ollama'],
-  heavy: ['claude', 'codex', 'devin', 'antigravity', 'opencode', 'gemini', 'copilot', 'qwen', 'ollama'],
+  light: ['freebuff', 'opencode', 'antigravity', 'claude', 'devin'],
+  medium: ['antigravity', 'freebuff', 'opencode', 'claude', 'devin'],
+  heavy: ['claude', 'devin', 'opencode', 'antigravity', 'freebuff'],
 };
 
 // --- 2. Detect "this CLI is out of juice" failures ---------------------------
 
-const QUOTA_RE = /rate.?limit|quota|usage limit|limit (reached|exceeded)|exceeded|429|insufficient|out of (credits?|tokens?)|no credits?|credit balance|billing|overloaded|capacity|try again later|too many requests/i;
-const AUTH_RE = /unauthori[sz]ed|not (logged|signed) in|login required|authentication|invalid (api )?key|expired|401|403|forbidden|please (log|sign) in/i;
+const QUOTA_RE = /rate.?limit|quota|usage limit|usage cap|daily limit|limit (reached|exceeded)|exceeded|429|402|payment required|insufficient|out of (credits?|tokens?|quota)|no credits?|credit balance|billing|overloaded|capacity|try again (later|in)|too many requests|temporarily unavailable/i;
+const AUTH_RE = /unauthori[sz]ed|not (logged|signed) in|login required|please (log|sign) in|authentication (failed|required|error)|invalid (api )?key|expired (token|session|credentials)|token (has )?expired|session expired|re-?authenticate|401|403|forbidden/i;
 
 export function failureReason(code, output) {
   const tail = output.slice(-4000);
@@ -47,15 +49,17 @@ export function buildChain(prompt, cfg = loadConfig()) {
   const tier = classify(prompt);
   const order = cfg.chain?.length ? cfg.chain : TIER_ORDER[tier];
   const ready = [];
+  const skipped = [];
   for (const id of order) {
     const cli = byId(id);
-    if (!cli || !cli.runArgs) continue;
+    if (!cli || !(cli.autoArgs || cli.runArgs)) continue;
+    if (cli.auto === false) { skipped.push(cli.id); continue; }
     if (!which(cli.bin)) continue;
     const s = inspect(cli);
     if (!s.auth.authed) continue;
     ready.push(cli);
   }
-  return { tier, chain: ready };
+  return { tier, chain: ready, skipped };
 }
 
 // --- 4. Run with fallback ----------------------------------------------------
@@ -64,7 +68,7 @@ function runOnce(cli, prompt, model) {
   return new Promise((resolve) => {
     const args = [];
     if (model && cli.model?.flag) args.push(cli.model.flag.split(' ')[0], model);
-    args.push(...cli.runArgs(prompt));
+    args.push(...(cli.autoArgs || cli.runArgs)(prompt));
     const spec = spawnSpec(which(cli.bin), args, { stdio: ['inherit', 'pipe', 'pipe'] });
     const child = spawn(spec.file, spec.args, spec.options);
     let output = '';
@@ -85,18 +89,19 @@ export async function cmdAuto(promptParts) {
   if (!prompt) return fail('Usage: sw auto <prompt>   e.g. sw auto fix the failing test');
 
   const cfg = loadConfig();
-  const { tier, chain } = buildChain(prompt, cfg);
+  const { tier, chain, skipped } = buildChain(prompt, cfg);
   if (!chain.length) {
-    return fail('No installed + authenticated CLI available. Run: sw status, then sw auth all');
+    return fail('No installed + authenticated CLI available for auto mode. Run: sw doctor, then sw auth all');
   }
 
   heading(`Auto mode — task looks ${c.bold(tier)}`);
   info(`Chain: ${chain.map((x) => x.id).join(' → ')}  ${c.gray('(override: sw chain <id,id,...>)')}`);
+  if (skipped.length) info(`${skipped.join(', ')} excluded: interactive TUI, cannot run unattended.`);
 
   for (let i = 0; i < chain.length; i++) {
     const cli = chain[i];
     const model = cfg.models[cli.id];
-    console.log(`\n${c.cyan('▶')} ${c.bold(cli.name)}${model ? c.gray(' · ' + model) : ''}`);
+    console.log(`\n${c.cyan('▶')} ${c.bold(cli.name)}${model && cli.model?.flag ? c.gray(' · ' + model) : ''}`);
     const { code, output } = await runOnce(cli, prompt, model);
     const reason = failureReason(code, output);
     if (!reason) {
@@ -108,7 +113,7 @@ export async function cmdAuto(promptParts) {
     if (i < chain.length - 1) info(`Switching to ${c.bold(chain[i + 1].name)}…`);
   }
   console.log();
-  fail('All CLIs in the chain failed. Check: sw status / sw auth all');
+  fail('All CLIs in the chain failed. Check: sw doctor / sw auth all');
   process.exit(1);
 }
 
@@ -126,7 +131,8 @@ export function cmdChain(arg) {
       for (const [tier, order] of Object.entries(TIER_ORDER)) {
         console.log(`    ${c.cyan(tier.padEnd(6))} ${order.join(' → ')}`);
       }
-      console.log(c.gray('\n  pin your own: sw chain claude,gemini,ollama'));
+      console.log(c.gray('\n  Freebuff is excluded from auto (interactive TUI).'));
+      console.log(c.gray('  Pin your own: sw chain claude,devin,opencode,antigravity'));
     }
     return;
   }
@@ -138,7 +144,11 @@ export function cmdChain(arg) {
   const ids = arg.split(/[,\s]+/).filter(Boolean);
   const bad = ids.filter((id) => !byId(id));
   if (bad.length) return fail(`Unknown CLI id(s): ${bad.join(', ')}. Known: ${CLIS.map((x) => x.id).join(', ')}`);
-  cfg.chain = ids;
+  const excluded = ids.filter((id) => byId(id).auto === false);
+  const usable = ids.filter((id) => byId(id).auto !== false);
+  if (excluded.length) warn(`${excluded.join(', ')} excluded: interactive TUI, cannot run unattended.`);
+  if (!usable.length) return fail('No usable CLI ids left in that chain.');
+  cfg.chain = usable;
   saveConfig(cfg);
-  ok(`Fallback chain set: ${ids.join(' → ')} (used for every sw auto run).`);
+  ok(`Fallback chain set: ${usable.join(' → ')} (used for every sw auto run).`);
 }

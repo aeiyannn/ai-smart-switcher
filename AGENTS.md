@@ -1,40 +1,51 @@
 # Project context
 
-> Single source of truth for ALL AI coding agents. CLAUDE.md / GEMINI.md /
-> QWEN.md are symlinks to this file — edit only AGENTS.md.
+> Single source of truth for ALL AI coding agents. CLAUDE.md and knowledge.md
+> are mirrors of this file — edit only AGENTS.md.
 
 ## What this project is
 
-smart-switcher: a zero-dependency Node.js CLI (`sw` / `npx smart-switcher`)
-that manages AI coding CLIs — detect/install/auth/launch them, save default
-models, and keep one shared AGENTS.md context via symlinks.
+ai-smart-switcher: a zero-dependency Node.js CLI (`sw` / `npx ai-smart-switcher`)
+that manages exactly five AI coding CLIs — Claude Code, OpenCode, Freebuff,
+Devin CLI and Antigravity CLI. It detects/installs/authenticates them, saves
+default models, routes tasks with automatic fallback, and keeps ONE shared
+`AGENTS.md` context plus ONE shared memory file (`~/.ai-smart-switcher/memory.md`).
 
 ## Commands
 
 - run locally: `node bin/cli.js <command>` (e.g. `status`, `free`, `context tokens`)
-- syntax check: `node --check bin/cli.js src/*.js`
+- tests: `npm test` (`node --test test/`)
+- syntax check: `node --check bin/cli.js` and every `src/*.js`
 
 ## Structure
 
-- `bin/cli.js` — entry + command dispatch + interactive menu
-- `src/registry.js` — data-only registry of supported CLIs (install/auth/model/free facts)
+- `bin/cli.js` — entry, help, command dispatch, interactive picker
+- `src/registry.js` — data-only registry: claude, opencode, freebuff, devin, antigravity
 - `src/detect.js` — which/version/auth detection; `src/commands.js` — command impls
-- `src/context.js` — AGENTS.md creation, symlinks, token report/optimizer
-- `plugins/claude`, `plugins/opencode` — slash-command wrappers for those agents
+- `src/auto.js` — task classification, tier chains, quota/auth fallback
+- `src/context.js` — AGENTS.md source, CLAUDE.md + knowledge.md mirrors, token report
+- `src/store.js` — single `memory.md`: save/search/show/autosave
+- `src/config.js` — `~/.ai-smart-switcher/config.json` (`AI_SWITCHER_HOME` overrides)
+- `scripts/postinstall.js` — optional host wiring on global install
+- `plugins/claude`, `plugins/opencode` — slash-command wrappers (call the global `sw`)
 
 ## Conventions
 
 - ESM, Node >= 18, ZERO runtime dependencies — keep it that way
 - terminal UI helpers come from `src/ui.js` (no chalk/inquirer)
+- plugin commands call the globally installed `sw`, never `npx <package>`
+- no prompt may run when `CI` / `AI_SWITCHER_NO_PROMPT` is set or stdin is not a TTY
 
 ## Do not
 
 - add npm dependencies
-- edit CLAUDE.md/GEMINI.md/QWEN.md directly (they are symlinks to this file)
+- edit CLAUDE.md or knowledge.md directly (they mirror this file)
+- re-add Codex, Gemini CLI, Copilot, Qwen, Ollama or Vercel support — the set is fixed
 
 ## Agent memory (applies to EVERY agent reading this)
 
 - Before reading large files to answer a question, run
-  `npx smart-switcher context search "<keywords>"` and use the matched chunk.
+  `sw context search "<keywords>"` and use the matched chunk.
 - After an important decision or completed task, run
-  `npx smart-switcher context save "<one-line summary>"` so other agents know.
+  `sw context save "<one-line summary>"` so every agent knows.
+- The full shared memory lives in one file: `~/.ai-smart-switcher/memory.md`.

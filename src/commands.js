@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { CLIS, byId } from './registry.js';
-import { inspect, inspectAll, which } from './detect.js';
+import { authStatus, inspect, inspectAll, which } from './detect.js';
 import { spawnSpec } from './spawn.js';
 import { loadConfig, saveConfig, configPath } from './config.js';
 import { c, fail, heading, info, ok, select, table, warn } from './ui.js';
@@ -13,7 +13,7 @@ const statusCell = (s) => {
 
 export function cmdStatus() {
   const cfg = loadConfig();
-  heading('smart-switcher — AI CLI status');
+  heading('ai-smart-switcher — AI CLI status');
   const rows = inspectAll(CLIS).map((s) => [
     (cfg.defaultCli === s.cli.id ? c.cyan('★ ') : '  ') + c.bold(s.cli.id),
     s.cli.name,
@@ -22,8 +22,8 @@ export function cmdStatus() {
     cfg.models[s.cli.id] || c.gray(s.cli.model?.examples?.[0] || ''),
   ]);
   table(rows, ['', 'CLI', 'version', 'status', 'model']);
-  console.log(c.gray(`\n  ★ default · config: ${configPath}`));
-  console.log(c.gray('  sw install <cli> · sw auth <cli> · sw use <cli> · sw run [cli] [prompt]'));
+  console.log(c.gray(`\n  ★ default · config: ${configPath()}`));
+  console.log(c.gray('  sw install <cli> · sw auth <cli|all> · sw use <cli> · sw run [cli] [prompt]'));
 }
 
 // One checkup command: status table + what's broken + how to fix + free options.
@@ -31,7 +31,7 @@ export function cmdDoctor() {
   cmdStatus();
   const states = inspectAll(CLIS);
   const needAuth = states.filter((s) => s.installed && !s.auth.authed && s.cli.authCmd);
-  const freeMissing = states.filter((s) => !s.installed && /FREE/.test(s.cli.free || ''));
+  const freeMissing = states.filter((s) => !s.installed && /free/i.test(s.cli.free || ''));
 
   heading('Fixes');
   if (!needAuth.length) ok('Everything installed is logged in.');
@@ -48,31 +48,47 @@ export function cmdDoctor() {
   console.log(c.gray('\n  Then: sw  (pick & launch)  ·  sw auto "<task>"  (auto-route with fallback)'));
 }
 
+// Install a single CLI. Returns true when its binary is available afterwards.
+export function installOne(cli) {
+  if (which(cli.bin)) {
+    ok(`${cli.name} already installed.`);
+    return true;
+  }
+  const { npm, curl } = cli.install || {};
+  if (npm) {
+    info(`Installing ${cli.name}: npm install -g ${npm}`);
+    const spec = spawnSpec(which('npm') || 'npm', ['install', '-g', npm], { stdio: 'inherit' });
+    const r = spawnSync(spec.file, spec.args, spec.options);
+    if (r.status !== 0) {
+      fail(`npm install failed for ${cli.name}. Try manually: npm install -g ${npm}`);
+      return false;
+    }
+    ok(`${cli.name} installed.`);
+    if (cli.id === 'freebuff') {
+      info('Freebuff opens its own interactive TUI — launch it with: sw run freebuff');
+    }
+    return true;
+  }
+  if (curl) {
+    warn(`${cli.name} has no npm package. Install it manually:\n    ${curl}`);
+    return false;
+  }
+  warn(`${cli.name}: no automated install available. See ${cli.url || cli.vendor}.`);
+  return false;
+}
+
 export async function cmdInstall(id) {
   const targets = id === 'all'
-    ? CLIS.filter((x) => !which(x.bin) && (x.install.npm || x.install.brew))
+    ? CLIS.filter((x) => !which(x.bin))
     : [mustFind(id)];
+
+  if (!targets.length) return ok('Every supported CLI is already installed.');
+
+  for (const cli of targets) installOne(cli);
+
+  // Claude Code / OpenCode get our slash commands + Claude autosave hooks.
   const wantsIntegration = targets.some((x) => x.id === 'claude' || x.id === 'opencode');
-  for (const cli of targets) {
-    if (which(cli.bin)) { ok(`${cli.name} already installed.`); continue; }
-    const { npm, brew, curl } = cli.install;
-    if (npm) {
-      info(`Installing ${cli.name}: npm install -g ${npm}`);
-      const spec = spawnSpec(which('npm') || 'npm', ['install', '-g', npm], { stdio: 'inherit' });
-      const r = spawnSync(spec.file, spec.args, spec.options);
-      r.status === 0 ? ok(`${cli.name} installed.`) : fail(`npm install failed for ${cli.name}.`);
-    } else if (brew && which('brew')) {
-      info(`Installing ${cli.name}: brew install ${brew}`);
-      const spec = spawnSpec(which('brew'), ['install', ...brew.split(' ').slice(0, 1)], { stdio: 'inherit' });
-      const r = spawnSync(spec.file, spec.args, spec.options);
-      r.status === 0 ? ok(`${cli.name} installed.`) : fail(`brew install failed for ${cli.name}.`);
-    } else if (curl) {
-      warn(`${cli.name} has no npm package. Install manually:\n    ${curl}`);
-    } else {
-      warn(`${cli.name}: no automated install available.`);
-    }
-  }
-  if (wantsIntegration) {
+  if (wantsIntegration && targets.some((x) => which(x.bin))) {
     const { cmdSetup } = await import('./setup.js');
     await cmdSetup();
   }
@@ -112,7 +128,7 @@ export function cmdAuth(id) {
   heading(`Authenticating ${cli.name}`);
   info(`Method: ${cli.authCmd}`);
   if (cli.authEnv?.length) info(`Alternative: export ${cli.authEnv[0]}=<key>`);
-  // If authCmd is a plain runnable command (no spaces-with-parens hint), run it.
+  // If authCmd is a plain runnable command (no parenthesised hint), run it.
   const runnable = cli.authCmd.split(' ');
   if (!cli.authCmd.includes('(')) {
     const spec = spawnSpec(which(runnable[0]) || runnable[0], runnable.slice(1), { stdio: 'inherit' });
@@ -157,7 +173,11 @@ export function cmdModel(id, model) {
   }
   cfg.models[cli.id] = model;
   saveConfig(cfg);
-  ok(`${cli.name} default model set to ${c.bold(model)} (applied by "sw run ${cli.id}").`);
+  if (!cli.model?.flag) {
+    warn(`${cli.name} picks models inside its own TUI — saved "${model}" is informational only.`);
+  } else {
+    ok(`${cli.name} default model set to ${c.bold(model)} (applied by "sw run ${cli.id}").`);
+  }
 }
 
 export function cmdRun(id, promptParts) {
@@ -169,14 +189,20 @@ export function cmdRun(id, promptParts) {
   if (!cli) return fail('No default CLI set. Run: sw use');
   const binPath = which(cli.bin);
   if (!binPath) return fail(`${cli.name} is not installed. Run: sw install ${cli.id}`);
+  const auth = authStatus(cli);
+  if (!auth.authed) warn(`${cli.name} is not connected. Run: sw auth ${cli.id}`);
+
+  const text = (prompt || []).join(' ').trim();
+  if (cli.id === 'freebuff' && text) {
+    warn('Freebuff is an interactive TUI — it takes no prompt argument. Launching it now; paste your task there.');
+  }
 
   const args = [];
   const model = cfg.models[cli.id];
   if (model && cli.model?.flag) args.push(cli.model.flag.split(' ')[0], model);
-  const text = (prompt || []).join(' ').trim();
   args.push(...(cli.runArgs ? cli.runArgs(text || undefined) : []));
 
-  info(`Launching ${c.bold(cli.name)}${model ? ' with model ' + c.cyan(model) : ''}…`);
+  info(`Launching ${c.bold(cli.name)}${model && cli.model?.flag ? ' with model ' + c.cyan(model) : ''}…`);
   const spec = spawnSpec(binPath, args, { stdio: 'inherit' });
   const child = spawn(spec.file, spec.args, spec.options);
   child.on('exit', (code) => process.exit(code ?? 0));
@@ -184,24 +210,22 @@ export function cmdRun(id, promptParts) {
 
 export function cmdFree() {
   heading('Free ways to run AI coding agents');
-  const rows = CLIS
-    .map((cli) => [c.bold(cli.id), cli.free])
-    .sort((a, b) => Number(b[1].includes('FREE')) - Number(a[1].includes('FREE')));
-  table(rows);
-  console.log(`
-  ${c.bold('Best free stack (zero cost, verified Oct 2026):')}
-  1. ${c.cyan('Ollama')} — unlimited local models, and ${c.bold('ollama launch claude|opencode|codex')}
-     auto-wires any agent to a local model (no manual config)
-  2. ${c.cyan('Antigravity CLI (agy)')} — free with a Google account; Google's
-     designated free coding CLI (replaced Gemini CLI's free tier, June 2026)
-  3. ${c.cyan('OpenCode + Zen free models')} — opencode auth login → free GLM-5.3-Flash,
-     DeepSeek V4.1 Flash, Nemotron 3 Ultra ("limited time")
-  4. ${c.cyan('Copilot CLI')} — Copilot Free: 50 premium requests/month
-  5. ${c.cyan('Free API keys in any CLI')} — Gemini key (250 req/day Flash),
-     Groq (~1,000 req/day), OpenRouter ':free' models (50 req/day)
+  table(CLIS.map((cli) => [c.bold(cli.id), cli.free]));
 
-  ${c.gray('Dead free tiers (do not trust old blog posts): Qwen OAuth (ended Apr 2026),')}
-  ${c.gray('Gemini CLI free OAuth for new users (June 2026), Devin SWE-2 promo (Oct 2026).')}`);
+  console.log(`
+  ${c.bold('Best free stack (verified October 2026):')}
+  1. ${c.cyan('Freebuff')} — 100% free and ad-funded, no API key. GLM 5.3 Flash,
+     DeepSeek V4.1 Flash, MiMo v2.6 Flash Fast. Free for 5 hours/day
+     (4 hours on VPN). ${c.gray('npm i -g freebuff')} → ${c.bold('sw run freebuff')}
+  2. ${c.cyan('Antigravity CLI (agy)')} — free with a personal Google account;
+     Google's designated free coding CLI since June 2026. Check ${c.bold('/usage')}.
+  3. ${c.cyan('OpenCode + Zen free models')} — open source; ${c.bold('opencode auth login')}
+     gives free GLM 5.3 Flash / DeepSeek V4.1 Flash access (limited time).
+  4. ${c.cyan('Free API keys in any CLI')} — Groq (~1,000 req/day) and OpenRouter
+     ":free" models (50 req/day) work well inside OpenCode.
+
+  ${c.gray('Paid (no free tier): Claude Code needs Pro/Max or an API key; Devin needs a plan.')}
+  ${c.gray('Freebuff is an interactive TUI, so "sw auto" never routes to it.')}`);
 }
 
 function mustFind(id) {

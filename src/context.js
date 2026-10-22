@@ -1,11 +1,11 @@
 // Universal context file management.
 //
 // Strategy: AGENTS.md (the open standard) is the single source of truth.
-// Every other per-CLI file (CLAUDE.md, GEMINI.md, QWEN.md,
-// .github/copilot-instructions.md) becomes a symlink to it, so:
-//   - you edit ONE file,
-//   - every CLI reads the SAME instructions,
-//   - no drift, no duplicated tokens across files.
+// The only per-CLI mirrors are:
+//   - CLAUDE.md    for Claude Code
+//   - knowledge.md for Freebuff (it reads knowledge.md first)
+// Every other supported CLI (OpenCode, Devin, Antigravity) reads AGENTS.md
+// natively. You edit ONE file; every agent reads the SAME instructions.
 import {
   existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync,
   renameSync, symlinkSync, unlinkSync, writeFileSync,
@@ -18,18 +18,20 @@ export const SOURCE = 'AGENTS.md';
 // target file -> relative symlink destination from that file's directory
 export const MIRRORS = [
   { file: 'CLAUDE.md', cli: 'Claude Code' },
-  { file: 'GEMINI.md', cli: 'Gemini CLI' },
-  { file: 'QWEN.md', cli: 'Qwen Code' },
-  { file: '.github/copilot-instructions.md', cli: 'GitHub Copilot' },
+  { file: 'knowledge.md', cli: 'Freebuff' },
 ];
+
+// Mirrors from 0.1.x. They are removed only when they are clearly ours (a
+// generated copy or a broken-symlink stub containing nothing but "AGENTS.md").
+const LEGACY_MIRRORS = ['GEMINI.md', 'QWEN.md', '.github/copilot-instructions.md'];
 
 const TEMPLATE = `# Project context
 
 > Single source of truth for ALL AI coding agents (Claude Code, OpenCode,
-> Gemini CLI, Codex, Copilot, Qwen...). CLAUDE.md / GEMINI.md / QWEN.md are
-> mirrors of this file (symlinks, or copies on Windows without Developer Mode)
-> — edit only AGENTS.md. Keep it short: every line here is prepended to every
-> prompt, so each line costs tokens on every request.
+> Freebuff, Devin and Antigravity). CLAUDE.md and knowledge.md are mirrors of
+> this file (symlinks, or copies on Windows without Developer Mode) — edit only
+> AGENTS.md. Keep it short: every line here is prepended to every prompt, so
+> each line costs tokens on every request.
 
 ## What this project is
 
@@ -52,29 +54,41 @@ const TEMPLATE = `# Project context
 ## Agent memory (applies to EVERY agent reading this)
 
 - Before reading large files to answer a question, run
-  \`npx smart-switcher context search "<keywords>"\` and use the matched chunk.
+  \`sw context search "<keywords>"\` and use the matched chunk.
 - After an important decision or completed task, run
-  \`npx smart-switcher context save "<one-line summary>"\` so other agents know.
+  \`sw context save "<one-line summary>"\` so every agent knows.
+- The full shared memory lives in one file: \`~/.ai-smart-switcher/memory.md\`.
 `;
 
 const isSymlink = (p) => {
   try { return lstatSync(p).isSymbolicLink(); } catch { return false; }
 };
 
+const read = (p) => {
+  try { return readFileSync(p, 'utf8'); } catch { return ''; }
+};
+
 // Windows without Developer Mode (or admin) cannot create symlinks, so mirrors
 // fall back to a generated copy that every `sw context` run refreshes. The
 // marker is what lets us tell our own copy apart from a file the user wrote.
-const MIRROR_NOTE = '<!-- smart-switcher mirror of AGENTS.md — do not edit; edit AGENTS.md and run: npx smart-switcher context -->';
-const isMirror = (p) => {
-  try { return readFileSync(p, 'utf8').startsWith(MIRROR_NOTE); } catch { return false; }
-};
+const MIRROR_NOTE = '<!-- ai-smart-switcher mirror of AGENTS.md — do not edit; edit AGENTS.md and run: sw context -->';
 
-// Is this file already synced to AGENTS.md (symlinked, or our generated copy)?
-const isSynced = (p) => isSymlink(p) || isMirror(p);
+const isMirror = (p) => read(p).startsWith(MIRROR_NOTE);
+
+// A materialized symlink on Windows can be a tiny file whose entire content is
+// the link target ("AGENTS.md"). Treat it as a link, never as user content.
+const isLinkStub = (p) => /^\s*AGENTS\.md\s*$/.test(read(p));
+
+const isSynced = (p) => isSymlink(p) || isMirror(p) || isLinkStub(p);
+
+const isOurLegacyMirror = (p) => {
+  const text = read(p);
+  return text.includes('smart-switcher mirror of AGENTS.md') || /^\s*AGENTS\.md\s*$/.test(text);
+};
 
 function writeMirrorCopy(root, file) {
   const sourcePath = join(root, SOURCE);
-  writeFileSync(join(root, file), MIRROR_NOTE + '\n\n' + readFileSync(sourcePath, 'utf8'));
+  writeFileSync(join(root, file), MIRROR_NOTE + '\n\n' + read(sourcePath));
 }
 
 // Re-copy any mirror that could not be symlinked. Returns how many were updated.
@@ -93,11 +107,26 @@ function refreshMirrorCopies(root) {
 export const estimateTokens = (text) => Math.ceil(text.length / 4);
 
 function backup(root, file) {
-  const dir = join(root, '.smart-switcher-backup');
+  const dir = join(root, '.ai-smart-switcher-backup');
   mkdirSync(dir, { recursive: true });
   const dest = join(dir, file.replaceAll('/', '__') + '.' + Date.now() + '.bak');
   renameSync(join(root, file), dest);
   return relative(root, dest);
+}
+
+// Remove only mirrors we generated in 0.1.x (or empty broken-symlink stubs),
+// so upgrading leaves exactly one context file plus CLAUDE.md/knowledge.md.
+function cleanLegacyMirrors(root) {
+  const removed = [];
+  for (const file of LEGACY_MIRRORS) {
+    const p = join(root, file);
+    if (!existsSync(p) || !isOurLegacyMirror(p)) continue;
+    try {
+      unlinkSync(p);
+      removed.push(file);
+    } catch { /* leave it */ }
+  }
+  return removed;
 }
 
 export function contextInit(root = process.cwd()) {
@@ -105,18 +134,17 @@ export function contextInit(root = process.cwd()) {
   heading('Universal context — one file for every CLI');
 
   // 1. Create or merge AGENTS.md
-  let merged = '';
   if (!existsSync(sourcePath)) {
-    // Seed from the largest existing per-CLI file if any, else template.
+    // Seed from an existing per-CLI file if any, else the template.
     const existing = MIRRORS
       .map((m) => join(root, m.file))
       .filter((p) => existsSync(p) && !isSynced(p));
     if (existing.length) {
-      const texts = existing.map((p) => readFileSync(p, 'utf8'));
-      merged = texts[0];
-      for (let i = 1; i < texts.length; i++) {
-        if (!merged.includes(texts[i].slice(0, 200))) {
-          merged += `\n\n<!-- merged from ${relative(root, existing[i])} -->\n\n` + texts[i];
+      let merged = read(existing[0]);
+      for (let i = 1; i < existing.length; i++) {
+        const text = read(existing[i]);
+        if (text && !merged.includes(text.slice(0, 200))) {
+          merged += `\n\n<!-- merged from ${relative(root, existing[i])} -->\n\n` + text;
         }
       }
       writeFileSync(sourcePath, merged);
@@ -129,6 +157,9 @@ export function contextInit(root = process.cwd()) {
     info(`${SOURCE} already exists — keeping it as the source of truth.`);
   }
 
+  const cleaned = cleanLegacyMirrors(root);
+  if (cleaned.length) info(`Removed legacy mirror(s): ${cleaned.join(', ')}`);
+
   // 2. Point every mirror at it
   for (const m of MIRRORS) {
     const p = join(root, m.file);
@@ -140,8 +171,8 @@ export function contextInit(root = process.cwd()) {
       if (readlinkSync(p) === linkTarget) { ok(`${m.file} → ${SOURCE}  ${c.gray('(' + m.cli + ', already linked)')}`); continue; }
       unlinkSync(p);
     } else if (existsSync(p)) {
-      if (isMirror(p)) {
-        unlinkSync(p); // our own generated copy — refresh it below
+      if (isMirror(p) || isLinkStub(p)) {
+        unlinkSync(p); // our own mirror — refresh it below
       } else {
         const saved = backup(root, m.file);
         warn(`${m.file} had its own content — backed up to ${saved}`);
@@ -159,7 +190,7 @@ export function contextInit(root = process.cwd()) {
     }
   }
 
-  info('OpenCode, Codex, Copilot, Devin and Antigravity read AGENTS.md natively — nothing to link.');
+  info('OpenCode, Devin and Antigravity read AGENTS.md natively — nothing to link.');
   contextTokens(root);
 }
 
@@ -171,9 +202,9 @@ export function contextTokens(root = process.cwd()) {
   const linked = MIRRORS.filter((m) => isSynced(join(root, m.file))).length;
   heading('Context token report');
   console.log(`  ${SOURCE}: ~${c.bold(tokens.toLocaleString())} tokens (${text.length.toLocaleString()} chars, ${text.split('\n').length} lines)`);
-  console.log(`  Mirrors synced: ${linked}/${MIRRORS.length} — one copy on disk instead of ${linked + 1}.`);
-  console.log(c.gray(`  Every line is sent on every request to every agent. Target: < 1,500 tokens.`));
-  if (tokens > 1500) warn(`Context is large. Run: sw context optimize`);
+  console.log(`  Mirrors synced: ${linked}/${MIRRORS.length} (CLAUDE.md for Claude Code, knowledge.md for Freebuff).`);
+  console.log(c.gray('  Every line is sent on every request to every agent. Target: < 1,500 tokens.'));
+  if (tokens > 1500) warn('Context is large. Run: sw context optimize');
 }
 
 // Lossless-ish shrink: trailing whitespace, >2 blank lines, HTML comments,

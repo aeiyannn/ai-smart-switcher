@@ -1,41 +1,150 @@
-// Shared context store + fast local search.
+// Universal memory + fast local search.
 //
-// Token-saving idea: instead of every agent loading whole files into its
-// prompt, it runs `sw context search "<query>"` and pastes ONLY the matching
-// chunk. Chunks are scored with sparse term-frequency vectors (cosine
-// similarity) — zero dependencies, instant, fully local.
-// (Note: base64 does NOT save tokens — it makes text ~33% longer. Retrieval
-// of small relevant chunks is what actually cuts token use.)
+// One file — ~/.ai-smart-switcher/memory.md — is shared by EVERY agent.
+// Notes are grouped by project:
 //
-// `sw context save "<note>"` stores a note/summary in a per-project store at
-// ~/.smart-switcher/context/, so EVERY agent (Claude Code, OpenCode, Gemini…)
-// can search what another agent learned earlier.
-import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+//   ## C:\path\to\project
+//   - 2026-10-22 14:03 · [asked] fix the auth race
+//
+// Token-saving idea: instead of loading whole files, an agent runs
+// `sw context search "<query>"` (or `sw memory search`) and pastes ONLY the
+// matching chunk. Chunks are scored with sparse term-frequency vectors
+// (cosine similarity) — zero dependencies, instant, fully local.
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { extname, join, relative } from 'node:path';
+import { basename, dirname, extname, join, relative, resolve } from 'node:path';
+import { stateHome } from './config.js';
 import { c, fail, heading, info, ok } from './ui.js';
 
-const STORE_DIR = join(homedir(), '.smart-switcher', 'context');
 const TEXT_EXT = new Set(['.md', '.txt', '.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.py', '.rb', '.go', '.rs', '.java', '.json', '.yml', '.yaml', '.toml', '.sh', '.css', '.html']);
-const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', 'out', '.next', 'coverage', '.smart-switcher-backup', 'vendor']);
+const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', 'out', '.next', 'coverage', '.ai-smart-switcher-backup', '.smart-switcher-backup', 'vendor']);
 const MAX_FILE = 200 * 1024;
 const CHUNK_LINES = 30;
+const MAX_NOTES_PER_PROJECT = 300;
 
-const projectFile = (root) =>
-  join(STORE_DIR, createHash('sha1').update(root).digest('hex').slice(0, 12) + '.json');
+export const memoryFile = () => join(stateHome(), 'memory.md');
 
-function loadStore(root) {
+const MEMORY_HEADER = `# AI Smart Switcher — shared memory
+
+One memory file shared by every supported agent: Claude Code, OpenCode,
+Freebuff, Devin and Antigravity. Entries are grouped by project.
+
+- Read it:    sw memory
+- Search it:  sw memory search "<keywords>"
+- Add a note: sw context save "<one-line summary>"
+
+`;
+
+// --- memory file -------------------------------------------------------------
+
+const pad = (n) => String(n).padStart(2, '0');
+
+function stamp(date = new Date()) {
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function parseMemory(text) {
+  const projects = new Map();
+  let current = null;
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.replace(/\s+$/, '');
+    if (line.startsWith('## ')) {
+      current = line.slice(3).trim();
+      if (!projects.has(current)) projects.set(current, []);
+    } else if (current && line.startsWith('- ')) {
+      projects.get(current).push(line.slice(2).trim());
+    }
+  }
+  return projects;
+}
+
+const noteText = (entry) => {
+  const i = entry.indexOf(' · ');
+  return i === -1 ? entry : entry.slice(i + 3);
+};
+
+const entryDate = (entry) => {
+  const i = entry.indexOf(' · ');
+  return i === -1 ? '' : entry.slice(0, i);
+};
+
+function renderMemory(projects) {
+  let out = MEMORY_HEADER;
+  for (const [root, entries] of projects) {
+    out += `## ${root}\n\n`;
+    out += entries.map((e) => `- ${e}`).join('\n');
+    out += '\n\n';
+  }
+  return out.replace(/\n{3,}$/, '\n');
+}
+
+// Import the 0.1.x per-project JSON stores once, so no memory is lost on
+// upgrade. Skipped when AI_SWITCHER_HOME isolates the install.
+function migrateLegacyMemory() {
+  if (process.env.AI_SWITCHER_HOME) return;
+  const file = memoryFile();
+  if (existsSync(file)) return;
+  const dir = join(homedir(), '.smart-switcher', 'context');
+  if (!existsSync(dir)) return;
+
+  const projects = new Map();
+  let files = [];
+  try { files = readdirSync(dir).filter((f) => f.endsWith('.json')); } catch { return; }
+  for (const name of files) {
+    try {
+      const data = JSON.parse(readFileSync(join(dir, name), 'utf8'));
+      const root = String(data.root || 'imported project');
+      const entries = (data.snapshots || [])
+        .map((s) => {
+          const at = String(s.at || '').replace('T', ' ').slice(0, 16);
+          const note = String(s.note || '').replace(/\s+/g, ' ').trim();
+          return note ? `${at} · ${note}` : '';
+        })
+        .filter(Boolean);
+      if (entries.length) projects.set(root, entries.slice(-MAX_NOTES_PER_PROJECT));
+    } catch { /* skip unreadable legacy file */ }
+  }
+  if (!projects.size) return;
   try {
-    return JSON.parse(readFileSync(projectFile(root), 'utf8'));
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, renderMemory(projects));
+  } catch { /* migration is best-effort */ }
+}
+
+function readProjects() {
+  migrateLegacyMemory();
+  const file = memoryFile();
+  if (!existsSync(file)) {
+    try {
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, MEMORY_HEADER);
+    } catch { /* read-only home: fall through to empty */ }
+  }
+  try {
+    return parseMemory(readFileSync(file, 'utf8'));
   } catch {
-    return { root, snapshots: [] };
+    return new Map();
   }
 }
 
-function persist(root, store) {
-  mkdirSync(STORE_DIR, { recursive: true });
-  writeFileSync(projectFile(root), JSON.stringify(store));
+function appendNote(root, rawNote) {
+  const note = String(rawNote || '').replace(/\s+/g, ' ').trim().slice(0, 600);
+  if (!note) return { saved: false, count: 0, reason: 'empty' };
+
+  const key = resolve(root);
+  const projects = readProjects();
+  const entries = projects.get(key) || [];
+  const last = entries[entries.length - 1];
+  if (last && noteText(last) === note) return { saved: false, count: entries.length, reason: 'duplicate' };
+
+  entries.push(`${stamp()} · ${note}`);
+  if (entries.length > MAX_NOTES_PER_PROJECT) entries.splice(0, entries.length - MAX_NOTES_PER_PROJECT);
+  projects.set(key, entries);
+
+  const file = memoryFile();
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, renderMemory(projects));
+  return { saved: true, count: entries.length, reason: 'saved' };
 }
 
 // --- sparse term vectors ------------------------------------------------------
@@ -61,7 +170,7 @@ function cosine(a, b) {
 
 // --- chunking the project -----------------------------------------------------
 
-function* walk(dir, root, depth = 0) {
+function* walk(dir, depth = 0) {
   if (depth > 6) return;
   let entries;
   try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
@@ -69,7 +178,7 @@ function* walk(dir, root, depth = 0) {
     if (e.name.startsWith('.') && e.name !== '.github') continue;
     const p = join(dir, e.name);
     if (e.isDirectory()) {
-      if (!SKIP_DIRS.has(e.name)) yield* walk(p, root, depth + 1);
+      if (!SKIP_DIRS.has(e.name)) yield* walk(p, depth + 1);
     } else if (TEXT_EXT.has(extname(e.name))) {
       yield p;
     }
@@ -78,7 +187,7 @@ function* walk(dir, root, depth = 0) {
 
 function chunksOf(root) {
   const chunks = [];
-  for (const file of walk(root, root)) {
+  for (const file of walk(root)) {
     let st;
     try { st = statSync(file); } catch { continue; }
     if (st.size > MAX_FILE || st.size === 0) continue;
@@ -100,15 +209,17 @@ function chunksOf(root) {
 export function contextSave(noteParts, root = process.cwd()) {
   const note = (noteParts || []).join(' ').trim();
   if (!note) return fail('Usage: sw context save "<what you learned / decided>"');
-  const store = loadStore(root);
-  store.snapshots.push({ at: new Date().toISOString().slice(0, 16), note });
-  if (store.snapshots.length > 300) store.snapshots.splice(0, store.snapshots.length - 300);
-  persist(root, store);
-  ok(`Saved to the shared context store (${store.snapshots.length} notes). Every agent can find it with: sw context search`);
+  const { saved, count } = appendNote(root, note);
+  if (!saved) {
+    info(`Already the latest note for this project (${count} note(s)). Nothing new saved.`);
+    return;
+  }
+  ok(`Saved to the shared memory (${count} note(s) for this project).`);
+  info(`Every agent can read it: ${memoryFile()}`);
 }
 
 // AUTO capture — no manual step. Claude Code hooks pipe their JSON payload to
-// `smart-switcher context autosave`:
+// `ai-smart-switcher context autosave`:
 //   UserPromptSubmit -> saves what was asked   ([asked] ...)
 //   Stop             -> saves what the agent answered/did ([done] ...)
 // Silent, never fails, always exits 0 (a hook must not break the session).
@@ -137,13 +248,7 @@ export async function contextAutosave() {
       }
     }
     if (!note) return;
-
-    const store = loadStore(root);
-    const last = store.snapshots[store.snapshots.length - 1];
-    if (last && last.note === note) return; // dedupe
-    store.snapshots.push({ at: new Date().toISOString().slice(0, 16), note });
-    if (store.snapshots.length > 300) store.snapshots.splice(0, store.snapshots.length - 300);
-    persist(root, store);
+    appendNote(root, note);
   } catch {
     /* hooks must never fail the session */
   }
@@ -153,16 +258,32 @@ export function contextSearch(queryParts, root = process.cwd()) {
   const query = (queryParts || []).join(' ').trim();
   if (!query) return fail('Usage: sw context search "<question or keywords>"');
 
-  const store = loadStore(root);
-  const pool = [
-    ...store.snapshots.map((s) => ({ src: `saved note (${s.at})`, text: s.note })),
-    ...chunksOf(root),
-  ];
+  const key = resolve(root);
+  const projects = readProjects();
+  const pool = [];
+  for (const [project, entries] of projects) {
+    for (const entry of entries) {
+      const note = noteText(entry);
+      if (!note) continue;
+      const label = basename(project) || project;
+      pool.push({
+        src: `memory · ${label}${entryDate(entry) ? ' · ' + entryDate(entry) : ''}`,
+        text: note,
+        project,
+      });
+    }
+  }
+  pool.push(...chunksOf(root));
   if (!pool.length) return fail('Nothing to search yet. Save notes with: sw context save "<note>"');
 
   const q = vectorize(query);
   const scored = pool
-    .map((ch) => ({ ...ch, score: cosine(q, vectorize(ch.text)) }))
+    .map((ch) => {
+      let score = cosine(q, vectorize(ch.text));
+      if (ch.project && resolve(ch.project) === key) score *= 1.25; // this project wins ties
+      if (ch.src.startsWith('memory')) score *= 1.1;               // concise notes over raw chunks
+      return { ...ch, score };
+    })
     .filter((x) => x.score > 0)
     .sort((a, b) => b.score - a.score)
     .slice(0, 5);
@@ -174,5 +295,32 @@ export function contextSearch(queryParts, root = process.cwd()) {
     const preview = hit.text.split('\n').slice(0, 8).map((l) => '    ' + l).join('\n');
     console.log(preview);
   }
-  console.log(c.gray(`\n  ${pool.length} chunks searched. Paste only the matching chunk into your agent — not the whole file. That is the token saving.`));
+  console.log(c.gray(`\n  ${pool.length} chunks searched (${projects.size} project(s) in shared memory). Paste only the matching chunk — not the whole file.`));
+}
+
+export function contextShow(root = process.cwd()) {
+  const projects = readProjects();
+  const key = resolve(root);
+  const mine = projects.get(key) || [];
+  let total = 0;
+  for (const entries of projects.values()) total += entries.length;
+
+  heading('Shared memory — one file for every agent');
+  console.log(`  file:     ${c.bold(memoryFile())}`);
+  console.log(`  projects: ${projects.size}   notes: ${total}`);
+
+  if (mine.length) {
+    heading(`This project — ${mine.length} note(s)`);
+    for (const entry of mine.slice(-20)) console.log(`  ${c.gray('·')} ${entry}`);
+    if (mine.length > 20) info(`Showing the latest 20 of ${mine.length}. Open the file for the rest.`);
+  } else {
+    info('No notes for this project yet. Save one with: sw context save "<one-line summary>"');
+  }
+
+  const others = [...projects.keys()].filter((p) => p !== key);
+  if (others.length) {
+    heading(`Other projects (${others.length})`);
+    for (const p of others.slice(0, 10)) console.log(`  ${c.gray('·')} ${p}`);
+  }
+  console.log(c.gray(`\n  Search across all of it: sw memory search "<keywords>"`));
 }

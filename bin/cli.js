@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// smart-switcher — universal manager for AI coding CLIs.
+// ai-smart-switcher — universal manager for AI coding CLIs.
 import { CLIS, byId } from '../src/registry.js';
 import { inspectAll } from '../src/detect.js';
 import { loadConfig } from '../src/config.js';
@@ -12,23 +12,24 @@ import { c, select } from '../src/ui.js';
 const [cmd, ...rest] = process.argv.slice(2);
 
 const HELP = `
-${c.bold('smart-switcher')} — one manager for every AI coding CLI
+${c.bold('ai-smart-switcher')} — one manager for every AI coding CLI
 
   ${c.cyan('sw')}                    pick a connected agent and launch it
   ${c.cyan('sw auto "<task>"')}      best agent for the task, auto-switches when limits hit
-  ${c.cyan('sw doctor')}             full checkup: installed? logged in? fixes + free options
+  ${c.cyan('sw doctor')}             full checkup: installed? connected? fixes + free options
   ${c.cyan('sw context')}            one AGENTS.md shared by every agent (saves tokens)
   ${c.cyan('sw context save "<note>"')}   remember a decision — shared with ALL agents
   ${c.cyan('sw context search "<q>"')}    instant local search: paste only the match, not whole files
+  ${c.cyan('sw memory')}             the single shared memory file (show · search · save)
 
 ${c.bold('Setup')}
   ${c.cyan('sw install <cli|all>')}  ${c.cyan('sw auth <cli|all>')}  ${c.cyan('sw use <cli>')}  ${c.cyan('sw model <cli> <model>')}
 
 ${c.bold('More')}
   ${c.cyan('sw run [cli] [prompt]')}   ${c.cyan('sw chain [ids|auto]')}
-  ${c.cyan('sw setup')} ${c.gray('add /doctor /auto /context + auto-capture to Claude Code, OpenCode & Codex')}
+  ${c.cyan('sw setup')} ${c.gray('add /doctor /auto /context + auto-capture to Claude Code & OpenCode')}
   ${c.cyan('sw setup remove')} ${c.gray('disable it all again (commands + hooks; nothing else touched)')}
-  ${c.gray('context subcommands: init · tokens · optimize · save · search')}
+  ${c.gray('context subcommands: init · show · tokens · optimize · save · search')}
 
 ${c.gray('Agents: ' + CLIS.map((x) => x.id).join(', '))}
 `;
@@ -134,12 +135,23 @@ try {
     case 'ctx': {
       const sub = rest[0] || 'init';
       if (sub === 'init' || sub === 'sync') contextInit();
+      else if (sub === 'show') (await import('../src/store.js')).contextShow();
       else if (sub === 'tokens') contextTokens();
       else if (sub === 'optimize') contextOptimize();
       else if (sub === 'save') (await import('../src/store.js')).contextSave(rest.slice(1));
       else if (sub === 'autosave') await (await import('../src/store.js')).contextAutosave();
       else if (sub === 'search' || sub === 'find') (await import('../src/store.js')).contextSearch(rest.slice(1));
-      else console.log('Usage: sw context <init|tokens|optimize|save|search>');
+      else console.log('Usage: sw context <init|show|tokens|optimize|save|search>');
+      break;
+    }
+    case 'memory':
+    case 'mem': {
+      const store = await import('../src/store.js');
+      const sub = rest[0] || 'show';
+      if (sub === 'search' || sub === 'find') store.contextSearch(rest.slice(1));
+      else if (sub === 'save' || sub === 'add') store.contextSave(rest.slice(1));
+      else if (sub === 'show' || sub === 'list') store.contextShow();
+      else store.contextSearch(rest); // `sw memory <keywords>` searches
       break;
     }
     case 'free':

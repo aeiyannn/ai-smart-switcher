@@ -19,7 +19,12 @@ export const c = {
 
 export const ok = (s) => console.log(`${c.green('✔')} ${s}`);
 export const warn = (s) => console.log(`${c.yellow('▲')} ${s}`);
-export const fail = (s) => console.log(`${c.red('✖')} ${s}`);
+// A failed command must fail the process: scripts and CI rely on the exit code.
+// We set exitCode instead of exiting so callers can finish their cleanup/output.
+export const fail = (s) => {
+  console.log(`${c.red('✖')} ${s}`);
+  process.exitCode = 1;
+};
 export const info = (s) => console.log(`${c.cyan('ℹ')} ${s}`);
 export const heading = (s) => console.log(`\n${c.bold(c.cyan(s))}`);
 
